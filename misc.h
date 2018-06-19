@@ -17,6 +17,14 @@ extern int hb_mode;
 extern int hb_len;
 extern int mtu_warn;
 
+extern int max_rst_allowed;
+extern int max_rst_to_show;
+
+extern int enable_dns_resolve;
+
+extern int ttl_value;
+
+
 const u32_t max_handshake_conn_num=10000;
 const u32_t max_ready_conn_num=1000;
 const u32_t anti_replay_window_size=4000;
@@ -65,6 +73,7 @@ union current_state_t
 	client_current_state_t client_current_state;
 };
 
+extern char remote_address[max_address_len];
 extern char local_ip[100], remote_ip[100],source_ip[100];//local_ip is for -l option,remote_ip for -r option,source for --source-ip
 extern u32_t local_ip_uint32,remote_ip_uint32,source_ip_uint32;//convert from last line.
 extern int local_port , remote_port,source_port;//similiar to local_ip  remote_ip,buf for port.source_port=0 indicates --source-port is not enabled
@@ -87,6 +96,8 @@ extern int keep_rule; //whether to monitor the iptables rule periodly,re-add if 
 extern int auto_add_iptables_rule;//if -a is set
 extern int generate_iptables_rule;//if -g is set
 extern int generate_iptables_rule_add;// if --gen-add is set
+extern int retry_on_error;
+const  int retry_on_error_interval=10;
 
 extern int debug_resend; // debug only
 

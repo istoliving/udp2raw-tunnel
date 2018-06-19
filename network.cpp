@@ -566,6 +566,13 @@ int send_raw_ip(raw_info_t &raw_info,const char * payload,int payloadlen)
 	const packet_info_t &recv_info=raw_info.recv_info;
 	char send_raw_ip_buf[buf_len];
 
+	if(raw_info.disabled)
+	{
+		mylog(log_debug,"[%s,%d]connection disabled, no packet will be sent\n",my_ntoa(recv_info.src_ip),recv_info.src_port);
+		assert(max_rst_allowed>=0);
+		return 0;
+	}
+
 	struct iphdr *iph = (struct iphdr *) send_raw_ip_buf;
     memset(iph,0,sizeof(iphdr));
 
@@ -584,7 +591,7 @@ int send_raw_ip(raw_info_t &raw_info,const char * payload,int payloadlen)
 
     iph->frag_off = htons(0x4000); //DF set,others are zero
    // iph->frag_off = htons(0x0000); //DF set,others are zero
-    iph->ttl = 64;
+    iph->ttl = (unsigned char)ttl_value;
     iph->protocol = send_info.protocol;
     iph->check = 0; //Set to 0 before calculating checksum
     iph->saddr = send_info.src_ip;    //Spoof the source ip address
@@ -704,7 +711,13 @@ int recv_raw_ip(raw_info_t &raw_info,char * &payload,int &payloadlen)
 	struct sockaddr_ll saddr={0};
 	socklen_t saddr_size = sizeof(saddr);
 	int flag=0;
-	int recv_len = recvfrom(raw_recv_fd, recv_raw_ip_buf, max_data_len, flag ,(sockaddr*)&saddr , &saddr_size);
+	int recv_len = recvfrom(raw_recv_fd, recv_raw_ip_buf, max_data_len+1, flag ,(sockaddr*)&saddr , &saddr_size);
+
+	if(recv_len==max_data_len+1)
+	{
+		mylog(log_warn,"huge packet, data_len > %d,dropped\n",max_data_len);
+		return -1;
+	}
 
 	if(recv_len<0)
 	{
@@ -1026,7 +1039,7 @@ int send_raw_tcp_deprecated(const packet_info_t &info,const char * payload,int p
 
     iph->id = htonl (ip_id++); //Id of this packet
     iph->frag_off = htons(0x4000); //DF set,others are zero
-    iph->ttl = 64;
+    iph->ttl = (unsigned char)ttl_value;
     iph->protocol = IPPROTO_TCP;
     iph->check = 0; //Set to 0 before calculating checksum
     iph->saddr = info.src_ip;    //Spoof the source ip address
@@ -1439,7 +1452,37 @@ int recv_raw_tcp(raw_info_t &raw_info,char * &payload,int &payloadlen)
 
     if(tcph->rst==1)
     {
-    	mylog(log_error,"[%s,%d]rst==1\n",my_ntoa(recv_info.src_ip),recv_info.src_port);
+		raw_info.rst_received++;
+
+    	if(max_rst_to_show>0)
+    	{
+    		if(raw_info.rst_received < max_rst_to_show)
+    		{
+    			mylog(log_warn,"[%s,%d]rst==1,cnt=%d\n",my_ntoa(recv_info.src_ip),recv_info.src_port,(int)raw_info.rst_received);
+    		}
+    		else if(raw_info.rst_received == max_rst_to_show)
+    		{
+    			mylog(log_warn,"[%s,%d]rst==1,cnt=%d >=max_rst_to_show, this log will be muted for current connection\n",my_ntoa(recv_info.src_ip),recv_info.src_port,(int)raw_info.rst_received);
+    		}
+    		else
+    		{
+    			mylog(log_debug,"[%s,%d]rst==1,cnt=%d\n",my_ntoa(recv_info.src_ip),recv_info.src_port,(int)raw_info.rst_received);
+    		}
+    	}
+    	else if(max_rst_to_show==0)
+    	{
+    		mylog(log_debug,"[%s,%d]rst==1,cnt=%d\n",my_ntoa(recv_info.src_ip),recv_info.src_port,(int)raw_info.rst_received);
+    	}
+    	else
+    	{
+    		mylog(log_warn,"[%s,%d]rst==1,cnt=%d\n",my_ntoa(recv_info.src_ip),recv_info.src_port,(int)raw_info.rst_received);
+    	}
+
+		if(max_rst_allowed>=0 && raw_info.rst_received==max_rst_allowed+1 )
+		{
+			mylog(log_warn,"[%s,%d]connection disabled because of rst_received=%d > max_rst_allow=%d\n",my_ntoa(recv_info.src_ip),recv_info.src_port,(int)raw_info.rst_received,(int)max_rst_allowed );
+			raw_info.disabled=1;
+		}
     }
 
    /* if(recv_info.has_ts)

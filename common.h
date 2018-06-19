@@ -24,6 +24,7 @@
 #include <sys/stat.h>
 #include <stdlib.h> //for exit(0);
 #include <errno.h> //For errno - the error number
+#include <netdb.h> // for gethostbyname()
 #include <netinet/tcp.h>   //Provides declarations for tcp header
 #include <netinet/udp.h>
 #include <netinet/ip.h>    //Provides declarations for ip header
@@ -85,8 +86,10 @@ struct ip_port_t
 
 typedef u64_t fd64_t;
 
-const int max_data_len=1600;
+const int max_data_len=1800;
 const int buf_len=max_data_len+400;
+
+const int max_address_len=512;
 
 u64_t get_current_time();
 u64_t pack_u64(u32_t a,u32_t b);

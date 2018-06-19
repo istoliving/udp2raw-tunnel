@@ -18,9 +18,17 @@ int hb_len=1200;
 
 int mtu_warn=1375;//if a packet larger than mtu warn is receviced,there will be a warning
 
+int max_rst_to_show=15;
+
+int max_rst_allowed=-1;
+
+int enable_dns_resolve=0;
+
+int ttl_value=64;
 
 fd_manager_t fd_manager;
 
+char remote_address[max_address_len]="";
 char local_ip[100]="0.0.0.0", remote_ip[100]="255.255.255.255",source_ip[100]="0.0.0.0";//local_ip is for -l option,remote_ip for -r option,source for --source-ip
 u32_t local_ip_uint32,remote_ip_uint32,source_ip_uint32;//convert from last line.
 int local_port = -1, remote_port=-1,source_port=0;//similiar to local_ip  remote_ip,buf for port.source_port=0 indicates --source-port is not enabled
@@ -43,6 +51,8 @@ int keep_rule=0; //whether to monitor the iptables rule periodly,re-add if loste
 int auto_add_iptables_rule=0;//if -a is set
 int generate_iptables_rule=0;//if -g is set
 int generate_iptables_rule_add=0;// if --gen-add is set
+
+int retry_on_error=0;
 
 int debug_resend=0; // debug only
 
@@ -112,8 +122,8 @@ void print_help()
 	printf("repository: https://github.com/wangyu-/udp2raw-tunnel\n");
 	printf("\n");
 	printf("usage:\n");
-	printf("    run as client : ./this_program -c -l local_listen_ip:local_port -r server_ip:server_port  [options]\n");
-	printf("    run as server : ./this_program -s -l server_listen_ip:server_port -r remote_ip:remote_port  [options]\n");
+	printf("    run as client : ./this_program -c -l local_listen_ip:local_port -r server_address:server_port  [options]\n");
+	printf("    run as server : ./this_program -s -l server_listen_ip:server_port -r remote_address:remote_port  [options]\n");
 	printf("\n");
 	printf("common options,these options must be same on both side:\n");
 	printf("    --raw-mode            <string>        avaliable values:faketcp(default),udp,icmp\n");
@@ -163,6 +173,7 @@ void print_help()
 	printf("    --hb-len              <number>        length of heart-beat packet, >=0 and <=1500\n");
 	printf("    --mtu-warn            <number>        mtu warning threshold, unit:byte, default:1375\n");
 	printf("    --clear                               clear any iptables rules added by this program.overrides everything\n");
+	printf("    --retry-on-error                      retry on error, allow to start udp2raw before network is initialized\n");
 	printf("    -h,--help                             print this help message\n");
 
 	//printf("common options,these options must be same on both side\n");
@@ -250,6 +261,7 @@ void process_arg(int argc, char *argv[])  //process all options
 		{"gen-rule", no_argument,    0, 'g'},
 		{"gen-add", no_argument,    0, 1},
 		{"debug", no_argument,    0, 1},
+		{"retry-on-error", no_argument,    0, 1},
 		{"clear", no_argument,    0, 1},
 		{"simple-rule", no_argument,    0, 1},
 		{"keep-rule", no_argument,    0, 1},
@@ -264,6 +276,10 @@ void process_arg(int argc, char *argv[])  //process all options
 		{"hb-mode", required_argument,    0, 1},
 		{"hb-len", required_argument,    0, 1},
 		{"mtu-warn", required_argument,    0, 1},
+		{"max-rst-to-show", required_argument,    0, 1},
+		{"max-rst-allowed", required_argument,    0, 1},
+		{"set-ttl", required_argument,    0, 1},
+		{"dns-resolve", no_argument,    0, 1},
 		{NULL, 0, 0, 0}
 	  };
 
@@ -383,7 +399,7 @@ void process_arg(int argc, char *argv[])  //process all options
 		case 'r':
 			no_r = 0;
 			if (strchr(optarg, ':') != 0) {
-				sscanf(optarg, "%[^:]:%d", remote_ip, &remote_port);
+				sscanf(optarg, "%[^:]:%d", remote_address, &remote_port);
 				if(remote_port==22)
 				{
 					mylog(log_fatal,"port 22 not allowed\n");
@@ -544,6 +560,10 @@ void process_arg(int argc, char *argv[])  //process all options
 			{
 				force_socket_buf=1;
 			}
+			else if(strcmp(long_options[option_index].name,"retry-on-error")==0)
+			{
+				retry_on_error=1;
+			}
 			else if(strcmp(long_options[option_index].name,"wait-lock")==0)
 			{
 				wait_xtables_lock=1;
@@ -620,6 +640,30 @@ void process_arg(int argc, char *argv[])  //process all options
 				assert(mtu_warn>0);
 				mylog(log_info,"mtu_warn=%d \n",mtu_warn);
 			}
+			else if(strcmp(long_options[option_index].name,"max-rst-to-show")==0)
+			{
+				sscanf(optarg,"%d",&max_rst_to_show);
+				assert(max_rst_to_show>=-1);
+				mylog(log_info,"max_rst_to_show=%d \n",max_rst_to_show);
+			}
+			else if(strcmp(long_options[option_index].name,"max-rst-allowed")==0)
+			{
+				sscanf(optarg,"%d",&max_rst_allowed);
+				assert(max_rst_allowed>=-1);
+				mylog(log_info,"max_rst_allowed=%d \n",max_rst_allowed);
+			}
+			else if(strcmp(long_options[option_index].name,"set-ttl")==0)
+			{
+				sscanf(optarg,"%d",&ttl_value);
+				assert(ttl_value>=0&&ttl_value<=255);
+				mylog(log_info,"ttl_value=%d\n",ttl_value);
+			}
+
+			else if(strcmp(long_options[option_index].name,"dns-resolve")==0)  // currently not used
+			{
+				enable_dns_resolve=1;
+				mylog(log_info,"dns-resolve enabled\n");
+			}
 			else
 			{
 				mylog(log_warn,"ignored unknown long option ,option_index:%d code:<%x>\n",option_index, optopt);
@@ -657,7 +701,7 @@ void process_arg(int argc, char *argv[])  //process all options
 
 	 log_bare(log_info,"local_ip=%s ",local_ip);
 	 log_bare(log_info,"local_port=%d ",local_port);
-	 log_bare(log_info,"remote_ip=%s ",remote_ip);
+	 log_bare(log_info,"remote_address=%s ",remote_address);
 	 log_bare(log_info,"remote_port=%d ",remote_port);
 	 log_bare(log_info,"source_ip=%s ",source_ip);
 	 log_bare(log_info,"source_port=%d ",source_port);
