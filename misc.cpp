@@ -15,6 +15,7 @@
 
 int hb_mode=1;
 int hb_len=1200;
+char hb_buf[buf_len];
 
 int mtu_warn=1375;//if a packet larger than mtu warn is receviced,there will be a warning
 
@@ -28,14 +29,21 @@ int ttl_value=64;
 
 fd_manager_t fd_manager;
 
-char remote_address[max_address_len]="";
-char local_ip[100]="0.0.0.0", remote_ip[100]="255.255.255.255",source_ip[100]="0.0.0.0";//local_ip is for -l option,remote_ip for -r option,source for --source-ip
-u32_t local_ip_uint32,remote_ip_uint32,source_ip_uint32;//convert from last line.
-int local_port = -1, remote_port=-1,source_port=0;//similiar to local_ip  remote_ip,buf for port.source_port=0 indicates --source-port is not enabled
+//char remote_address[max_address_len]="";
+//char local_ip[100]="0.0.0.0", remote_ip[100]="255.255.255.255",source_ip[100]="0.0.0.0";//local_ip is for -l option,remote_ip for -r option,source for --source-ip
+//u32_t local_ip_uint32,remote_ip_uint32,source_ip_uint32;//convert from last line.
+//int local_port = -1, remote_port=-1,source_port=0;//similiar to local_ip  remote_ip,buf for port.source_port=0 indicates --source-port is not enabled
+address_t local_addr,remote_addr,source_addr;
 
+my_ip_t bind_addr;
+
+int source_port=-1;
+
+int bind_addr_used=0;
 int force_source_ip=0; //if --source-ip is enabled
+int force_source_port=0;
 
-id_t const_id=0;//an id used for connection recovery,its generated randomly,it never change since its generated
+my_id_t const_id=0;//an id used for connection recovery,its generated randomly,it never change since its generated
 
 int udp_fd=-1;  //for client only. client use this fd to listen and handle udp connection
 int bind_fd=-1; //bind only,never send or recv.  its just a dummy fd for bind,so that other program wont occupy the same port
@@ -62,7 +70,7 @@ char fifo_file[1000]="";
 
 int clear_iptables=0;
 int wait_xtables_lock=0;
-string iptables_command0="iptables ";
+string iptables_command0="iptables/ip6tables ";
 string iptables_command="";
 string iptables_pattern="";
 int iptables_rule_added=0;
@@ -71,6 +79,7 @@ int iptables_rule_keep_index=0;
 
 program_mode_t program_mode=unset_mode;//0 unset; 1client 2server
 raw_mode_t raw_mode=mode_faketcp;
+u32_t raw_ip_version=(u32_t)-1;
 unordered_map<int, const char*> raw_mode_tostring = {{mode_faketcp, "faketcp"}, {mode_udp, "udp"}, {mode_icmp, "icmp"}};
 
 int about_to_exit=0;
@@ -80,7 +89,9 @@ int about_to_exit=0;
 
 
 int socket_buf_size=1024*1024;
-int force_socket_buf=0;
+//int force_socket_buf=0;
+
+
 
 //char lower_level_arg[1000];
 int process_lower_level_arg()//handle --lower-level option
@@ -118,7 +129,6 @@ void print_help()
 	printf("udp2raw-tunnel\n");
 	printf("git version:%s    ",git_version_buf);
 	printf("build date:%s %s\n",__DATE__,__TIME__);
-
 	printf("repository: https://github.com/wangyu-/udp2raw-tunnel\n");
 	printf("\n");
 	printf("usage:\n");
@@ -128,12 +138,14 @@ void print_help()
 	printf("common options,these options must be same on both side:\n");
 	printf("    --raw-mode            <string>        avaliable values:faketcp(default),udp,icmp\n");
 	printf("    -k,--key              <string>        password to gen symetric key,default:\"secret key\"\n");
-	printf("    --cipher-mode         <string>        avaliable values:aes128cbc(default),xor,none\n");
-	printf("    --auth-mode           <string>        avaliable values:md5(default),crc32,simple,none\n");
+	printf("    --cipher-mode         <string>        avaliable values:aes128cfb,aes128cbc(default),xor,none\n");
+	printf("    --auth-mode           <string>        avaliable values:hmac_sha1,md5(default),crc32,simple,none\n");
 	printf("    -a,--auto-rule                        auto add (and delete) iptables rule\n");
 	printf("    -g,--gen-rule                         generate iptables rule then exit,so that you can copy and\n");
 	printf("                                          add it manually.overrides -a\n");
 	printf("    --disable-anti-replay                 disable anti-replay,not suggested\n");
+	printf("    --fix-gro                             try to fix huge packet caused by GRO. this option is at an early stage.\n");
+	printf("                                          make sure client and server are at same version.\n");
 
 	//printf("\n");
 	printf("client options:\n");
@@ -154,6 +166,7 @@ void print_help()
 	printf("    --disable-bpf                         disable the kernel space filter,most time its not necessary\n");
 	printf("                                          unless you suspect there is a bug\n");
 //	printf("\n");
+	printf("    --dev                 <string>        bind raw socket to a device, not necessary but improves performance\n");
 	printf("    --sock-buf            <number>        buf size for socket,>=10 and <=10240,unit:kbyte,default:1024\n");
 	printf("    --force-sock-buf                      bypass system limitation while setting sock-buf\n");
 	printf("    --seq-mode            <number>        seq increase mode for faketcp:\n");
@@ -175,7 +188,6 @@ void print_help()
 	printf("    --clear                               clear any iptables rules added by this program.overrides everything\n");
 	printf("    --retry-on-error                      retry on error, allow to start udp2raw before network is initialized\n");
 	printf("    -h,--help                             print this help message\n");
-
 	//printf("common options,these options must be same on both side\n");
 }
 
@@ -187,7 +199,7 @@ int load_config(char *file_name, int &argc, vector<string> &argv) //load conf fi
 	std::string line;
 	if(conf_file.fail())
 	{
-		mylog(log_fatal,"conf_file %s open failed,reason :%s\n",file_name,strerror(errno));
+		mylog(log_fatal,"conf_file %s open failed,reason :%s\n",file_name,get_sock_error());
 		myexit(-1);
 	}
 	while(std::getline(conf_file,line))
@@ -225,6 +237,10 @@ int process_log_level(int argc,char *argv[])//process  --log-level and --disable
 				}
 			}
 		}
+		if(strcmp(argv[i],"--enable-color")==0)
+		{
+			enable_log_color=1;
+		}
 		if(strcmp(argv[i],"--disable-color")==0)
 		{
 			enable_log_color=0;
@@ -254,6 +270,7 @@ void process_arg(int argc, char *argv[])  //process all options
 		{"cipher-mode", required_argument,    0, 1},
 		{"raw-mode", required_argument,    0, 1},
 		{"disable-color", no_argument,    0, 1},
+		{"enable-color", no_argument,    0, 1},
 		{"log-position", no_argument,    0, 1},
 		{"disable-bpf", no_argument,    0, 1},
 		{"disable-anti-replay", no_argument,    0, 1},
@@ -279,7 +296,10 @@ void process_arg(int argc, char *argv[])  //process all options
 		{"max-rst-to-show", required_argument,    0, 1},
 		{"max-rst-allowed", required_argument,    0, 1},
 		{"set-ttl", required_argument,    0, 1},
+		{"dev", required_argument,    0, 1},
 		{"dns-resolve", no_argument,    0, 1},
+		{"easy-tcp", no_argument,    0, 1},
+        {"fix-gro", no_argument,    0, 1},
 		{NULL, 0, 0, 0}
 	  };
 
@@ -383,6 +403,13 @@ void process_arg(int argc, char *argv[])  //process all options
 		switch (opt) {
 		case 'l':
 			no_l = 0;
+			local_addr.from_str(optarg);
+			if(local_addr.get_port()==22)
+			{
+				mylog(log_fatal,"port 22 not allowed\n");
+				myexit(-1);
+			}
+			/*
 			if (strchr(optarg, ':') != 0) {
 				sscanf(optarg, "%[^:]:%d", local_ip, &local_port);
 				if(local_port==22)
@@ -393,11 +420,17 @@ void process_arg(int argc, char *argv[])  //process all options
 			} else {
 				mylog(log_fatal,"invalid parameter for -l ,%s,should be ip:port\n",optarg);
 				myexit(-1);
-
-			}
+			}*/
 			break;
 		case 'r':
 			no_r = 0;
+			remote_addr.from_str(optarg);
+			if(remote_addr.get_port()==22)
+			{
+				mylog(log_fatal,"port 22 not allowed\n");
+				myexit(-1);
+			}
+			/*
 			if (strchr(optarg, ':') != 0) {
 				sscanf(optarg, "%[^:]:%d", remote_address, &remote_port);
 				if(remote_port==22)
@@ -408,7 +441,7 @@ void process_arg(int argc, char *argv[])  //process all options
 			} else {
 				mylog(log_fatal,"invalid parameter for -r ,%s,should be ip:port\n",optarg);
 				myexit(-1);
-			}
+			}*/
 			break;
 		case 's':
 			if(program_mode==0)
@@ -453,8 +486,9 @@ void process_arg(int argc, char *argv[])  //process all options
 			else if(strcmp(long_options[option_index].name,"source-ip")==0)
 			{
 				mylog(log_debug,"parsing long option :source-ip\n");
-				sscanf(optarg, "%s", source_ip);
-				mylog(log_debug,"source: %s\n",source_ip);
+				//sscanf(optarg, "%s", source_ip);
+				source_addr.from_str_ip_only(optarg);
+				mylog(log_debug,"source: %s\n",source_addr.get_ip());
 				force_source_ip=1;
 			}
 			else if(strcmp(long_options[option_index].name,"source-port")==0)
@@ -462,9 +496,11 @@ void process_arg(int argc, char *argv[])  //process all options
 				mylog(log_debug,"parsing long option :source-port\n");
 				sscanf(optarg, "%d", &source_port);
 				mylog(log_info,"source: %d\n",source_port);
+				force_source_port=1;
 			}
 			else if(strcmp(long_options[option_index].name,"raw-mode")==0)
 			{
+				/*
 				for(i=0;i<mode_end;i++)
 				{
 					if(strcmp(optarg,raw_mode_tostring[i])==0)
@@ -479,6 +515,30 @@ void process_arg(int argc, char *argv[])  //process all options
 				{
 					mylog(log_fatal,"no such raw_mode %s\n",optarg);
 					myexit(-1);
+				}
+				 */
+				if(strcmp(optarg,"easyfaketcp")==0||strcmp(optarg,"easy_faketcp")==0||strcmp(optarg,"easy-faketcp")==0)
+				{
+					raw_mode=mode_faketcp;
+					use_tcp_dummy_socket=1;
+				}
+				else
+				{
+					for(i=0;i<mode_end;i++)
+					{
+						if(strcmp(optarg,raw_mode_tostring[i])==0)
+						{
+							//printf("%d i\n",i);
+							//printf("%s",raw_mode_tostring[i]);
+							raw_mode=(raw_mode_t)i;
+							break;
+						}
+					}
+					if(i==mode_end)
+					{
+						mylog(log_fatal,"no such raw_mode %s\n",optarg);
+						myexit(-1);
+					}
 				}
 			}
 			else if(strcmp(long_options[option_index].name,"auth-mode")==0)
@@ -503,9 +563,16 @@ void process_arg(int argc, char *argv[])  //process all options
 			}
 			else if(strcmp(long_options[option_index].name,"cipher-mode")==0)
 			{
+				string s=optarg;
+				if(s=="aes128cfb_0")
+				{
+					s="aes128cfb";
+					aes128cfb_old=1;
+					mylog(log_warn,"aes128cfb_0 is used\n");
+				}
 				for(i=0;i<cipher_end;i++)
 				{
-					if(strcmp(optarg,cipher_mode_tostring[i])==0)
+					if(strcmp(s.c_str(),cipher_mode_tostring[i])==0)
 					{
 						cipher_mode=(cipher_mode_t)i;
 						break;
@@ -514,6 +581,7 @@ void process_arg(int argc, char *argv[])  //process all options
 				if(i==cipher_end)
 				{
 
+					mylog(log_fatal,"no such cipher_mode %s\n",optarg);
 					myexit(-1);
 				}
 			}
@@ -542,10 +610,20 @@ void process_arg(int argc, char *argv[])  //process all options
 			{
 				//enable_log_color=0;
 			}
+			else if(strcmp(long_options[option_index].name,"enable-color")==0)
+			{
+				//enable_log_color=0;
+			}
 			else if(strcmp(long_options[option_index].name,"debug")==0)
 			{
 				debug_flag=1;
 				//enable_log_color=0;
+			}
+			else if(strcmp(long_options[option_index].name,"dev")==0)
+			{
+				sscanf(optarg,"%s",dev);
+				//enable_log_color=0;
+				mylog(log_info,"dev=[%s]\n",dev);
 			}
 			else if(strcmp(long_options[option_index].name,"debug-resend")==0)
 			{
@@ -664,6 +742,16 @@ void process_arg(int argc, char *argv[])  //process all options
 				enable_dns_resolve=1;
 				mylog(log_info,"dns-resolve enabled\n");
 			}
+			else if(strcmp(long_options[option_index].name,"easy-tcp")==0)
+			{
+				use_tcp_dummy_socket=1;
+				mylog(log_info,"--easy-tcp enabled, now a dummy tcp socket will be created for handshake and block rst\n");
+			}
+            else if(strcmp(long_options[option_index].name,"fix-gro")==0)
+            {
+                mylog(log_info,"--fix-gro enabled\n");
+                g_fix_gro=1;
+            }
 			else
 			{
 				mylog(log_warn,"ignored unknown long option ,option_index:%d code:<%x>\n",option_index, optopt);
@@ -686,9 +774,24 @@ void process_arg(int argc, char *argv[])  //process all options
 		print_help();
 		myexit(-1);
 	}
+	if(program_mode==client_mode)
+	{
+		raw_ip_version=remote_addr.get_type();
+	}
+	else
+	{
+		raw_ip_version=local_addr.get_type();
+	}
 
-	//if(lower_level)
-		//process_lower_level_arg();
+	 if(auto_add_iptables_rule&& use_tcp_dummy_socket)
+	 {
+		mylog(log_error,"-a,--auto-rule is not supposed to be used with easyfaketcp mode, you are likely making a mistake, but we can try to continue\n"); 
+	 }
+
+	 if(keep_rule&& use_tcp_dummy_socket)
+	 {
+		mylog(log_error,"--keep-rule is not supposed to be used with easyfaketcp mode, you are likely making a mistake, but we can try to continue\n"); 
+	 }
 
 	 mylog(log_info,"important variables: ");
 
@@ -699,16 +802,19 @@ void process_arg(int argc, char *argv[])  //process all options
 
 	 log_bare(log_info,"key=%s ",key_string);
 
-	 log_bare(log_info,"local_ip=%s ",local_ip);
-	 log_bare(log_info,"local_port=%d ",local_port);
-	 log_bare(log_info,"remote_address=%s ",remote_address);
-	 log_bare(log_info,"remote_port=%d ",remote_port);
-	 log_bare(log_info,"source_ip=%s ",source_ip);
-	 log_bare(log_info,"source_port=%d ",source_port);
+	 log_bare(log_info,"local_addr=%s ",local_addr.get_str());
+	 log_bare(log_info,"remote_addr=%s ",remote_addr.get_str());
+
+	 if(force_source_ip)
+		 log_bare(log_info,"source_addr=%s ",source_addr.get_ip());
+
+	 if(force_source_port)
+		 log_bare(log_info,"source_port=%d ",source_port);
 
 	 log_bare(log_info,"socket_buf_size=%d ",socket_buf_size);
 
 	 log_bare(log_info,"\n");
+
 }
 
 void pre_process_arg(int argc, char *argv[])//mainly for load conf file
@@ -817,6 +923,14 @@ void *run_keep(void *none)  //called in a new thread for --keep-rule option
 }
 void iptables_rule()  // handles -a -g --gen-add  --keep-rule --clear --wait-lock
 {
+	assert(raw_ip_version==AF_INET||raw_ip_version==AF_INET6);
+
+	if(raw_ip_version==AF_INET)
+	{
+		iptables_command0="iptables ";
+	}
+	else
+		iptables_command0="ip6tables ";
 	if(!wait_xtables_lock)
 	{
 		iptables_command=iptables_command0;
@@ -864,43 +978,61 @@ void iptables_rule()  // handles -a -g --gen-add  --keep-rule --clear --wait-loc
 
 	if(program_mode==client_mode)
 	{
+		tmp_pattern[0]=0;
 		if(raw_mode==mode_faketcp)
 		{
-			sprintf(tmp_pattern,"-s %s/32 -p tcp -m tcp --sport %d",remote_ip,remote_port);
+			sprintf(tmp_pattern,"-s %s -p tcp -m tcp --sport %d",remote_addr.get_ip(),remote_addr.get_port());
 		}
 		if(raw_mode==mode_udp)
 		{
-			sprintf(tmp_pattern,"-s %s/32 -p udp -m udp --sport %d",remote_ip,remote_port);
+			sprintf(tmp_pattern,"-s %s -p udp -m udp --sport %d",remote_addr.get_ip(),remote_addr.get_port());
 		}
 		if(raw_mode==mode_icmp)
 		{
-			sprintf(tmp_pattern,"-s %s/32 -p icmp",remote_ip);
+			if(raw_ip_version==AF_INET)
+				sprintf(tmp_pattern,"-s %s -p icmp --icmp-type 0",remote_addr.get_ip());
+			else
+				sprintf(tmp_pattern,"-s %s -p icmpv6 --icmpv6-type 129",remote_addr.get_ip());
 		}
-		pattern=tmp_pattern;
+		pattern+=tmp_pattern;
 	}
 	if(program_mode==server_mode)
 	{
+		tmp_pattern[0]=0;
+		if(raw_ip_version==AF_INET)
+		{
+			if(local_addr.inner.ipv4.sin_addr.s_addr!=0)
+			{
+				sprintf(tmp_pattern,"-d %s ",local_addr.get_ip());
+			}
+		}
+		else
+		{
+			char zero_arr[16]={0};
+			if(memcmp(&local_addr.inner.ipv6.sin6_addr,zero_arr,16)!=0)
+			{
+				sprintf(tmp_pattern,"-d %s ",local_addr.get_ip());
+			}
+		}
+		pattern+=tmp_pattern;
 
+		tmp_pattern[0]=0;
 		if(raw_mode==mode_faketcp)
 		{
-			sprintf(tmp_pattern,"-p tcp -m tcp --dport %d",local_port);
+			sprintf(tmp_pattern,"-p tcp -m tcp --dport %d",local_addr.get_port());
 		}
 		if(raw_mode==mode_udp)
 		{
-			sprintf(tmp_pattern,"-p udp -m udp --dport %d",local_port);
+			sprintf(tmp_pattern,"-p udp -m udp --dport %d",local_addr.get_port());
 		}
 		if(raw_mode==mode_icmp)
 		{
-			if(local_ip_uint32==0)
-			{
-				sprintf(tmp_pattern,"-p icmp");
-			}
+			if(raw_ip_version==AF_INET)
+				sprintf(tmp_pattern,"-p icmp --icmp-type 8");
 			else
-			{
-				sprintf(tmp_pattern,"-d %s/32 -p icmp",local_ip);
-			}
+				sprintf(tmp_pattern,"-p icmpv6 --icmpv6-type 128");
 		}
-		pattern=tmp_pattern;
+		pattern+=tmp_pattern;
 	}
 /*
 	if(!simple_rule)
@@ -926,19 +1058,6 @@ void iptables_rule()  // handles -a -g --gen-add  --keep-rule --clear --wait-loc
 
 	}*/
 
-	if(auto_add_iptables_rule)
-	{
-		iptables_rule_init(pattern.c_str(),const_id,keep_rule);
-		if(keep_rule)
-		{
-			if(pthread_create(&keep_thread, NULL, run_keep, 0)) {
-
-				mylog(log_fatal, "Error creating thread\n");
-				myexit(-1);
-			}
-			keep_thread_running=1;
-		}
-	}
 	if(generate_iptables_rule)
 	{
 		string rule=iptables_command+"-I INPUT ";
@@ -955,7 +1074,23 @@ void iptables_rule()  // handles -a -g --gen-add  --keep-rule --clear --wait-loc
 		myexit(0);
 	}
 
+	if(auto_add_iptables_rule)
+	{
+		iptables_rule_init(pattern.c_str(),const_id,keep_rule);
+		if(keep_rule)
+		{
+			if(pthread_create(&keep_thread, NULL, run_keep, 0)) {
 
+				mylog(log_fatal, "Error creating thread\n");
+				myexit(-1);
+			}
+			keep_thread_running=1;
+		}
+	}
+	else
+	{
+		mylog(log_warn," -a has not been set, make sure you have added the needed iptables rules manually\n");
+	}
 }
 
 int unit_test()
@@ -1015,7 +1150,6 @@ int unit_test()
 	}
 	return 0;
 }
-
 
 int set_timer(int epollfd,int &timer_fd)//put a timer_fd into epoll,general function,used both in client and server
 {
@@ -1251,6 +1385,3 @@ void  signal_handler(int sig)
 	about_to_exit=1;
     // myexit(0);
 }
-
-
-
