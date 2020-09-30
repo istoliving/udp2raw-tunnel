@@ -5,6 +5,7 @@
  *      Author: root
  */
 
+#ifndef UDP2RAW_MP
 
 #include "common.h"
 #include "network.h"
@@ -18,7 +19,7 @@
 int server_on_timer_multi(conn_info_t &conn_info)  //for server. called when a timer is ready in epoll.for server,there will be one timer for every connection
 // there is also a global timer for server,but its not handled here
 {
-	char ip_port[40];
+	char ip_port[max_addr_len];
 	//u32_t ip=conn_info.raw_info.send_info.dst_ip;
 	//u32_t port=conn_info.raw_info.send_info.dst_port;
 
@@ -444,7 +445,7 @@ int server_on_raw_recv_multi() //called when server received an raw packet
 	address_t addr;
 	addr.from_ip_port_new(raw_ip_version,&peek_info.new_src_ip,peek_info.src_port);
 
-	char ip_port[40];
+	char ip_port[max_addr_len];
 	addr.to_str(ip_port);
 	//sprintf(ip_port,"%s:%d",my_ntoa(ip),port);
 	mylog(log_trace,"[%s]peek_raw\n",ip_port);
@@ -458,6 +459,11 @@ int server_on_raw_recv_multi() //called when server received an raw packet
 			if(recv_raw0(tmp_raw_info,data,data_len)<0)
 			{
 				return 0;
+			}
+			if(data_len>=max_data_len+1)
+			{
+				mylog(log_debug,"data_len=%d >= max_data_len+1,ignored",data_len);
+				return -1;
 			}
 			if(use_tcp_dummy_socket!=0)
 				return 0;
@@ -911,3 +917,5 @@ int server_event_loop()
 	}
 	return 0;
 }
+
+#endif
